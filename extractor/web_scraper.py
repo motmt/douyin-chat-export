@@ -113,6 +113,18 @@ def _fetch(url, timeout=20):
         return resp.read()
 
 
+def _conv_subdir(conv_id):
+    """返回会话专属子目录名，如 'conv_0_1_62185797183_808834269460910'。
+
+    把冒号替换成下划线，避免 Windows 路径非法字符。
+    同一个会话不同次抓取，subdir 相同，可保证新下载落同一目录。
+    """
+    if not conv_id:
+        return ""
+    safe = re.sub(r'[<>:"/\\|?*]', '_', str(conv_id))
+    return f"conv_{safe}"
+
+
 def _save_emoji(url, emoji_dir):
     """下载表情包（普通 PNG/WEBP，无加密）。按 URL 路径哈希去重。
 
@@ -755,9 +767,16 @@ class WebChatScraper:
 
         return {"found": False, "count": len(all_debug_names), "names": all_debug_names[:20]}
 
-    async def _download_voice_files(self, messages):
-        """下载语音消息的音频文件到本地"""
-        voice_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "media", "voice")
+    async def _download_voice_files(self, messages, conv_id=None):
+        """下载语音消息的音频文件到本地
+
+        conv_id: 传入则把语音放到 data/media/conv_<id>/voice/ 子目录；
+                 传入 None 退化为 data/media/voice/（兼容老代码路径）
+        """
+        media_root = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "media")
+        if conv_id:
+            media_root = os.path.join(media_root, _conv_subdir(conv_id))
+        voice_dir = os.path.join(media_root, "voice")
         os.makedirs(voice_dir, exist_ok=True)
 
         voice_msgs = []
@@ -806,14 +825,18 @@ class WebChatScraper:
             except Exception as e:
                 print(f"  [voice] 下载失败: {server_id}: {e}")
 
-    async def _download_image_files(self, messages):
+    async def _download_image_files(self, messages, conv_id=None):
         """下载图片/表情包到本地。
         - 表情：直接保存（无加密），按 URL 路径哈希去重
         - 图片：从 origin_url 拉密文，AES-256-GCM 解密 (skey) 后保存
+
+        conv_id: 传入则放到 data/media/conv_<id>/{images,emoji}/；None 走老路径
         """
         if not self.download_images:
             return
         media_root = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "media")
+        if conv_id:
+            media_root = os.path.join(media_root, _conv_subdir(conv_id))
         img_dir = os.path.join(media_root, "images")
         emoji_dir = os.path.join(media_root, "emoji")
         os.makedirs(img_dir, exist_ok=True)
@@ -872,8 +895,13 @@ class WebChatScraper:
         性能优化: 之前每个 batch 调一次 _download_voice_files/_download_image_files，
         1000 条 batch × 50 条媒体 × 1-3s/条 = 几十秒到几分钟。改为抓完所有消息后，
         一次性收集所有待下载项，用 asyncio.Semaphore 限流并发，可提速 5-10 倍。
+
+        媒体按会话分子目录: data/media/conv_<safe_id>/{voice,images,emoji}/
+        老文件保持原位不动。
         """
         media_root = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "media")
+        if conv_id:
+            media_root = os.path.join(media_root, _conv_subdir(conv_id))
         voice_dir = os.path.join(media_root, "voice")
         img_dir = os.path.join(media_root, "images")
         emoji_dir = os.path.join(media_root, "emoji")
@@ -949,7 +977,7 @@ class WebChatScraper:
                         local_path = os.path.join(voice_dir, f"{sid}.mpeg")
                         with open(local_path, "wb") as f:
                             f.write(bytes(data))
-                        rel = f"voice/{sid}.mpeg"
+                        rel = os.path.join(_conv_subdir(conv_id), "voice", f"{sid}.mpeg").replace("\\", "/")
                         conn.execute("UPDATE messages SET local_path = ? WHERE server_id = ?", (rel, sid))
                     else:
                         failed_counter[0] += 1
@@ -978,7 +1006,7 @@ class WebChatScraper:
                         local_path = os.path.join(emoji_dir, f"{h}{ext}")
                         with open(local_path, "wb") as f:
                             f.write(bytes(data))
-                        rel = f"emoji/{h}{ext}"
+                        rel = os.path.join(_conv_subdir(conv_id), "emoji", f"{h}{ext}").replace("\\", "/")
                         conn.execute("UPDATE messages SET local_path = ? WHERE server_id = ?", (rel, sid))
                     else:
                         failed_counter[0] += 1
@@ -1021,7 +1049,7 @@ class WebChatScraper:
                         local_path = os.path.join(img_dir, f"{sid}.jpg")
                         with open(local_path, "wb") as f:
                             f.write(plaintext)
-                        rel = f"images/{sid}.jpg"
+                        rel = os.path.join(_conv_subdir(conv_id), "images", f"{sid}.jpg").replace("\\", "/")
                         conn.execute("UPDATE messages SET local_path = ? WHERE server_id = ?", (rel, sid))
                     except Exception as e:
                         # 解密失败不致命
