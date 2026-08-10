@@ -28,3 +28,5 @@ build/
 # OS
 .DS_Store
 Thumbs.db
+
+backend/control_panel.py.fastprobe.bak

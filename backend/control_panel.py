@@ -621,11 +621,9 @@ _login_probe_lock = asyncio.Lock()
 async def _probe_login_state() -> dict:
     """Single source of truth for whether the persistent profile is logged in.
 
-    Always launches Chromium against `_USER_DATA_DIR` and reads cookies via
-    Playwright. This intentionally goes through the same code path Chromium
-    uses internally so we never disagree with what the actual scraper sees
-    (whatever path the cookies DB lives at, WAL checkpoints, format
-    migrations — all handled by Chromium itself).
+    Fast path: read the Chromium cookies SQLite DB directly (milliseconds,
+    no browser launch). Slow path: fall back to launching Chromium with a
+    hard 8s timeout so one bad launch can't wedge the lock forever.
 
     Returns one of:
         {"status": "logged_in",  "has_cookies": True}
@@ -641,6 +639,23 @@ async def _probe_login_state() -> dict:
         has_profile = os.path.isdir(_USER_DATA_DIR) and os.listdir(_USER_DATA_DIR)
         if not has_profile:
             return {"status": "no_profile", "has_cookies": False}
+
+        # ── Fast path: read Chromium's cookies SQLite DB directly ──
+        # Chromium stores cookies at <user_data>/Default/Network/Cookies.
+        # Values are AES-encrypted with the OS keychain, but sessionid
+        # value is opaque to us — what matters is that the row exists
+        # AND its expires_utc is in the future. If sessionid is present
+        # and not expired, the scraper (which uses the same profile)
+        # will see the same thing.
+        cookies_db = os.path.join(_USER_DATA_DIR, "Default", "Network", "Cookies")
+        fast_result = _read_sessionid_from_sqlite(cookies_db)
+        if fast_result is not None:
+            return fast_result
+
+        # ── Slow path: launch Chromium (capped at 8s) ──
+        # We only get here if the cookies DB is missing, locked, or empty.
+        # In practice this means the user hasn't run a login yet OR the
+        # profile is genuinely broken and needs a re-login.
         try:
             from playwright.async_api import async_playwright
             pw = await async_playwright().start()
@@ -652,11 +667,16 @@ async def _probe_login_state() -> dict:
                 )
                 try:
                     page = ctx.pages[0] if ctx.pages else await ctx.new_page()
-                    await page.goto("https://www.douyin.com/", wait_until="domcontentloaded")
+                    await asyncio.wait_for(
+                        page.goto("https://www.douyin.com/", wait_until="domcontentloaded"),
+                        timeout=6.0,
+                    )
                     await asyncio.sleep(2)
                     cookies = await ctx.cookies("https://www.douyin.com")
-                    cookie_names = {c["name"] for c in cookies}
-                    has_login = "sessionid" in cookie_names
+                    has_login = any(
+                        c.get("name") == "sessionid" and c.get("value")
+                        for c in cookies
+                    )
                     return {
                         "status": "logged_in" if has_login else "expired",
                         "has_cookies": has_login,
@@ -665,8 +685,65 @@ async def _probe_login_state() -> dict:
                     await ctx.close()
             finally:
                 await pw.stop()
+        except asyncio.TimeoutError:
+            return {"status": "error", "has_cookies": False,
+                    "message": "login probe timeout (>8s)"}
         except Exception as e:
             return {"status": "error", "has_cookies": False, "message": str(e)}
+
+
+def _read_sessionid_from_sqlite(cookies_db: str) -> dict | None:
+    """Read sessionid cookie directly from Chromium's cookies DB.
+
+    Returns one of:
+        {"status": "logged_in", "has_cookies": True}  — sessionid present and not expired
+        {"status": "expired",   "has_cookies": False} — sessionid present but past expires_utc
+        None                                            — DB missing/locked, caller should fall back
+
+    Chromium stores expires_utc as microseconds since the 1601-01-01 epoch
+    (Windows FILETIME). 0 means a session cookie. We use a 5s skew buffer
+    so a sessionid expiring "right now" still counts as valid.
+    """
+    if not os.path.isfile(cookies_db):
+        return None
+    try:
+        import sqlite3
+        # Read-only URI mode avoids touching the WAL — safe even if Chromium
+        # has the DB open. timeout=0.5s so a hung file handle doesn't block.
+        uri = f"file:{cookies_db}?mode=ro"
+        conn = sqlite3.connect(uri, uri=True, timeout=0.5)
+    except Exception:
+        return None
+    try:
+        cur = conn.cursor()
+        # Try a cheap probe query first; if 'cookies' table doesn't exist
+        # or schema changed, return None and let caller fall back to Chromium.
+        cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='cookies'")
+        if not cur.fetchone():
+            return None
+        # Chromium epoch (1601-01-01) → Unix epoch: 11644473600 seconds
+        CHROMIUM_EPOCH_OFFSET_US = 11644473600 * 1_000_000
+        now_us = int(time.time() * 1_000_000) + CHROMIUM_EPOCH_OFFSET_US
+        cur.execute(
+            "SELECT value, expires_utc FROM cookies "
+            "WHERE host_key IN ('.douyin.com', 'www.douyin.com') "
+            "  AND name = 'sessionid' "
+            "LIMIT 1"
+        )
+        row = cur.fetchone()
+        if not row or not row[0]:
+            return {"status": "expired", "has_cookies": False}
+        _value, expires_utc = row
+        if expires_utc and expires_utc > 0 and expires_utc < now_us - 5_000_000:
+            return {"status": "expired", "has_cookies": False}
+        return {"status": "logged_in", "has_cookies": True}
+    except Exception:
+        return None
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
 
 
 @control_router.post("/api/conversations/refresh")
