@@ -866,6 +866,184 @@ class WebChatScraper:
         if ok or fail:
             print(f"  [media] 图片/表情/视频封面 已下载 {ok} 个 (失败 {fail})")
 
+    async def _download_all_media_parallel(self, conv_id, max_concurrent=10):
+        """全量并发下载一个会话的所有媒体文件。
+
+        性能优化: 之前每个 batch 调一次 _download_voice_files/_download_image_files，
+        1000 条 batch × 50 条媒体 × 1-3s/条 = 几十秒到几分钟。改为抓完所有消息后，
+        一次性收集所有待下载项，用 asyncio.Semaphore 限流并发，可提速 5-10 倍。
+        """
+        media_root = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "media")
+        voice_dir = os.path.join(media_root, "voice")
+        img_dir = os.path.join(media_root, "images")
+        emoji_dir = os.path.join(media_root, "emoji")
+        for d in (voice_dir, img_dir, emoji_dir):
+            os.makedirs(d, exist_ok=True)
+
+        conn = self._db_conn
+        # 查所有还没下载的 (server_id, content_json, msg_type)
+        rows = conn.execute(
+            "SELECT server_id, content_json, msg_type, local_path FROM messages "
+            "WHERE conv_id = ?",
+            (conv_id,),
+        ).fetchall()
+
+        voice_tasks = []   # (server_id, url)
+        image_tasks = []   # (server_id, origin, skey)
+        emoji_tasks = []   # (server_id, url)
+
+        for server_id, cj_str, msg_type, local_path in rows:
+            if not cj_str:
+                continue
+            # 跳过已经下载过的（local_path 非空且文件存在）
+            if local_path and not local_path.startswith("http"):
+                full = os.path.join(media_root, local_path.replace("/", os.sep))
+                if os.path.exists(full):
+                    continue
+            try:
+                cj = json.loads(cj_str)
+            except Exception:
+                continue
+
+            if msg_type == "other":
+                # 语音消息: msg_type=other 但 cj 有 resource_url + duration
+                ru = cj.get("resource_url") or {}
+                if ru.get("url_list") and cj.get("duration"):
+                    voice_tasks.append((server_id, ru["url_list"][0]))
+            elif msg_type == "image":
+                ru = cj.get("resource_url") or {}
+                skey = ru.get("skey")
+                origin = (ru.get("origin_url_list") or [None])[0]
+                if skey and origin:
+                    image_tasks.append((server_id, origin, skey))
+            elif msg_type == "emoji":
+                url_obj = cj.get("url")
+                if isinstance(url_obj, dict):
+                    ul = url_obj.get("url_list", [])
+                    if ul and isinstance(ul[0], str):
+                        emoji_tasks.append((server_id, ul[0]))
+
+        total = len(voice_tasks) + len(image_tasks) + len(emoji_tasks)
+        if total == 0:
+            print(f"  [media] 没有待下载的媒体")
+            return
+
+        print(f"  [media] 全量并发下载 {total} 个文件 (语音 {len(voice_tasks)} / 图片 {len(image_tasks)} / 表情 {len(emoji_tasks)})，并发={max_concurrent}")
+        start = time.time()
+        sem = asyncio.Semaphore(max_concurrent)
+        done_counter = [0]
+        failed_counter = [0]
+
+        async def _dl_voice(sid, url):
+            async with sem:
+                try:
+                    data = await self.page.evaluate("""async (url) => {
+                        try {
+                            const r = await fetch(url, {credentials: 'include'});
+                            if (!r.ok) return null;
+                            const buf = await r.arrayBuffer();
+                            return Array.from(new Uint8Array(buf));
+                        } catch { return null; }
+                    }""", url)
+                    if data and len(data) > 100:
+                        local_path = os.path.join(voice_dir, f"{sid}.mpeg")
+                        with open(local_path, "wb") as f:
+                            f.write(bytes(data))
+                        rel = f"voice/{sid}.mpeg"
+                        conn.execute("UPDATE messages SET local_path = ? WHERE server_id = ?", (rel, sid))
+                    else:
+                        failed_counter[0] += 1
+                except Exception as e:
+                    failed_counter[0] += 1
+                done_counter[0] += 1
+                if done_counter[0] % 50 == 0:
+                    print(f"  [media] 进度 {done_counter[0]}/{total} (失败 {failed_counter[0]})")
+
+        async def _dl_emoji(sid, url):
+            async with sem:
+                try:
+                    data = await self.page.evaluate("""async (url) => {
+                        try {
+                            const r = await fetch(url, {credentials: 'include'});
+                            if (!r.ok) return null;
+                            const buf = await r.arrayBuffer();
+                            return Array.from(new Uint8Array(buf));
+                        } catch { return null; }
+                    }""", url)
+                    if data and len(data) > 50:
+                        # emoji 不加密直接存，按 URL 路径哈希
+                        from hashlib import md5
+                        h = md5(url.encode()).hexdigest()[:16]
+                        ext = ".webp" if ".webp" in url.lower() else (".gif" if ".gif" in url.lower() else ".png")
+                        local_path = os.path.join(emoji_dir, f"{h}{ext}")
+                        with open(local_path, "wb") as f:
+                            f.write(bytes(data))
+                        rel = f"emoji/{h}{ext}"
+                        conn.execute("UPDATE messages SET local_path = ? WHERE server_id = ?", (rel, sid))
+                    else:
+                        failed_counter[0] += 1
+                except Exception:
+                    failed_counter[0] += 1
+                done_counter[0] += 1
+
+        async def _dl_image(sid, origin, skey):
+            """图片: AES-256-GCM 解密。复用 _save_image 但放在异步 wrapper 里。"""
+            async with sem:
+                try:
+                    # 拿密文
+                    data = await self.page.evaluate("""async (url) => {
+                        try {
+                            const r = await fetch(url, {credentials: 'include'});
+                            if (!r.ok) return null;
+                            const buf = await r.arrayBuffer();
+                            return Array.from(new Uint8Array(buf));
+                        } catch { return null; }
+                    }""", origin)
+                    if not data or len(data) < 50:
+                        failed_counter[0] += 1
+                        return
+                    # 解密并落盘 (与 _save_image 一致: AES-256-GCM)
+                    try:
+                        from Crypto.Cipher import AES
+                        b = bytes(data)
+                        if len(b) < 16:
+                            failed_counter[0] += 1
+                            return
+                        # skey 16 字节对齐，IV 取密文前 12 字节
+                        raw_key = skey.encode() if isinstance(skey, str) else skey
+                        if len(raw_key) < 32:
+                            raw_key = (raw_key + b"0" * 32)[:32]
+                        tag = b[-16:]
+                        ciphertext = b[12:-16]
+                        iv = b[:12]
+                        cipher = AES.new(raw_key[:32], AES.MODE_GCM, nonce=iv)
+                        plaintext = cipher.decrypt_and_verify(ciphertext, tag)
+                        local_path = os.path.join(img_dir, f"{sid}.jpg")
+                        with open(local_path, "wb") as f:
+                            f.write(plaintext)
+                        rel = f"images/{sid}.jpg"
+                        conn.execute("UPDATE messages SET local_path = ? WHERE server_id = ?", (rel, sid))
+                    except Exception as e:
+                        # 解密失败不致命
+                        failed_counter[0] += 1
+                except Exception:
+                    failed_counter[0] += 1
+                done_counter[0] += 1
+                if done_counter[0] % 50 == 0:
+                    print(f"  [media] 进度 {done_counter[0]}/{total} (失败 {failed_counter[0]})")
+
+        # fire all
+        coros = (
+            [_dl_voice(s, u) for s, u in voice_tasks] +
+            [_dl_emoji(s, u) for s, u in emoji_tasks] +
+            [_dl_image(s, o, k) for s, o, k in image_tasks]
+        )
+        if coros:
+            await asyncio.gather(*coros, return_exceptions=True)
+        conn.commit()
+        elapsed = time.time() - start
+        print(f"  [media] 全量下载完成: {total - failed_counter[0]}/{total} 成功, 失败 {failed_counter[0]}, 耗时 {elapsed:.1f}s")
+
     async def _extract_and_save_user_info(self, conv_id):
         """从 userInfoStore 提取用户信息（昵称、头像、unique_id），下载头像到本地。"""
         users = await self.page.evaluate("""() => {
@@ -1840,10 +2018,11 @@ class WebChatScraper:
                     "ref_msg": ref_msg_json,
                 })
 
-            # 下载语音文件
-            await self._download_voice_files(converted)
-            # 下载图片/表情（按配置）
-            await self._download_image_files(converted)
+            # 性能修复: 不再每个 batch 都串行下载媒体
+            # 改为全量消息抓完后再并发下载（见 _download_all_media_parallel）
+            # 这样 500 人群从 N×batch×单条延迟 变成 1×总延迟/并发数
+            # await self._download_voice_files(converted)
+            # await self._download_image_files(converted)
 
             newly_inserted = self._store_messages(converted, conv_id, batch_seq_start=0)
             total_saved += newly_inserted
@@ -1876,6 +2055,12 @@ class WebChatScraper:
             if not has_more:
                 print(f"  [*] 已到达聊天记录起点")
                 break
+
+        # 性能修复: 全量并发下载所有媒体（之前每个 batch 串行，大群超慢）
+        try:
+            await self._download_all_media_parallel(conv_id)
+        except Exception as e:
+            print(f"  [!] 全量并发下载媒体失败: {e}")
 
         # 5. 补全发送者身份（群聊必需）。失败不能影响已抓到的消息。
         try:

@@ -507,12 +507,17 @@ async def _run_scrape(cmd):
     _scrape_state["stopped"] = False
     try:
         os.makedirs(os.path.dirname(LOG_PATH), exist_ok=True)
-        with open(LOG_PATH, "w") as log_file:
+        # 关键修复: 日志文件用行缓冲 + 子进程强制 unbuffered
+        # 否则 Python print 写文件是块缓冲（4-8KB），前端会看到日志卡 30+ 秒
+        env = os.environ.copy()
+        env["PYTHONUNBUFFERED"] = "1"
+        with open(LOG_PATH, "w", buffering=1, encoding="utf-8") as log_file:
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdout=log_file,
                 stderr=asyncio.subprocess.STDOUT,
                 cwd=os.path.dirname(os.path.dirname(__file__)),
+                env=env,
             )
             _scrape_state["process"] = proc
             await proc.wait()
@@ -542,14 +547,20 @@ async def _run_scrape(cmd):
 
 
 @control_router.get("/api/scrape/log")
-async def scrape_log(lines: int = 50):
+async def scrape_log(lines: int = 200, max_bytes: int = 200_000):
+    """读取日志尾部，避免对大文件全量 readlines() 拖慢轮询。
+    默认只读最后 ~200KB，前端 JS 端再按行截断展示。
+    """
     if not os.path.exists(LOG_PATH):
         return {"log": ""}
     try:
-        with open(LOG_PATH, "r", encoding="utf-8", errors="replace") as f:
-            all_lines = f.readlines()
-        tail = all_lines[-lines:] if len(all_lines) > lines else all_lines
-        return {"log": "".join(tail)}
+        file_size = os.path.getsize(LOG_PATH)
+        with open(LOG_PATH, "rb") as f:
+            if file_size > max_bytes:
+                f.seek(file_size - max_bytes)
+                f.readline()  # 丢掉第一行（可能不完整）
+            data = f.read().decode("utf-8", errors="replace")
+        return {"log": data}
     except Exception:
         return {"log": ""}
 

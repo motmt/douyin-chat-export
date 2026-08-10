@@ -1078,7 +1078,7 @@ async function stopRefreshConvs() {
 
 async function loadLog() {
   try {
-    const r = await fetch('/panel/api/scrape/log?lines=80');
+    const r = await fetch('/panel/api/scrape/log?lines=200');
     const d = await r.json();
     const box = document.getElementById('scrapeLog');
     // 只有用户本来就贴着底部时才自动跟随，否则轮询会把往上翻的用户拽回底部
