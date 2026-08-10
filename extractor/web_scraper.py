@@ -909,9 +909,9 @@ class WebChatScraper:
             os.makedirs(d, exist_ok=True)
 
         conn = self._db_conn
-        # 查所有还没下载的 (server_id, content_json, msg_type)
+        # 查所有还没下载的 (msg_id, content_json, msg_type)
         rows = conn.execute(
-            "SELECT server_id, content_json, msg_type, local_path FROM messages "
+            "SELECT msg_id, content_json, msg_type, local_path FROM messages "
             "WHERE conv_id = ?",
             (conv_id,),
         ).fetchall()
@@ -978,7 +978,7 @@ class WebChatScraper:
                         with open(local_path, "wb") as f:
                             f.write(bytes(data))
                         rel = os.path.join(_conv_subdir(conv_id), "voice", f"{sid}.mpeg").replace("\\", "/")
-                        conn.execute("UPDATE messages SET local_path = ? WHERE server_id = ?", (rel, sid))
+                        conn.execute("UPDATE messages SET local_path = ? WHERE msg_id = ?", (rel, sid))
                     else:
                         failed_counter[0] += 1
                 except Exception as e:
@@ -1007,7 +1007,7 @@ class WebChatScraper:
                         with open(local_path, "wb") as f:
                             f.write(bytes(data))
                         rel = os.path.join(_conv_subdir(conv_id), "emoji", f"{h}{ext}").replace("\\", "/")
-                        conn.execute("UPDATE messages SET local_path = ? WHERE server_id = ?", (rel, sid))
+                        conn.execute("UPDATE messages SET local_path = ? WHERE msg_id = ?", (rel, sid))
                     else:
                         failed_counter[0] += 1
                 except Exception:
@@ -1050,7 +1050,7 @@ class WebChatScraper:
                         with open(local_path, "wb") as f:
                             f.write(plaintext)
                         rel = os.path.join(_conv_subdir(conv_id), "images", f"{sid}.jpg").replace("\\", "/")
-                        conn.execute("UPDATE messages SET local_path = ? WHERE server_id = ?", (rel, sid))
+                        conn.execute("UPDATE messages SET local_path = ? WHERE msg_id = ?", (rel, sid))
                     except Exception as e:
                         # 解密失败不致命
                         failed_counter[0] += 1
