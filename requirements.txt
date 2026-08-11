@@ -1,9 +1,0 @@
-playwright
-fastapi
-uvicorn
-sqlalchemy
-aiosqlite
-httpx
-apscheduler
-cryptography
-pillow-heif

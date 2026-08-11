@@ -1,0 +1,9 @@
+playwright==1.61.0
+fastapi
+uvicorn
+sqlalchemy
+aiosqlite
+httpx
+apscheduler
+cryptography
+pillow-heif

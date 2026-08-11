@@ -1,32 +1,43 @@
-# Debug & test scripts
-check_*.py
-debug_*.py
-test_*.py
-find_*.py
-create_pr.py
-
-# Logs
-*.log
-*.zip
-
-# Environment
-.env
-.venv/
-venv/
+# Python
 __pycache__/
+*.pyc
+venv/
+.venv/
 
-# Data (local only - user-specific)
-data/
-*.db
-*.sqlite
+# Runtime / data (user-specific, not for repo)
+runtime/
+app/data/browser_profile/
+app/data/media/
+app/data/chat.db
+app/data/douyin_chat.db
+app/data/cookies_backup.json
+app/data/conversations_list.json
+app/data/discover.log
+app/data/scrape.log
+app/data/export*.jsonl
+app/data/export*.zip
+app/data/export_tmp/
+app/data/exports/
+app/logs/
+*.log
 
-# Build artifacts
-dist/
-build/
-*.egg-info/
-
-# OS
+# Editor / OS
+.vscode/
+.idea/
 .DS_Store
 Thumbs.db
 
-backend/control_panel.py.fastprobe.bak
+# Backup files
+*.bak
+
+# Misc
+media.rar
+*.rar
+.server*.log
+226
+
+# Original repo backup (keep out of new repo)
+_original/
+
+# Release build artifacts
+douyin-chat-export-release.zip
