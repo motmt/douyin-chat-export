@@ -14,8 +14,30 @@ powershell -NoProfile -Command "$c = Get-NetTCPConnection -LocalPort 8001 -State
 
 if exist ".server.pid" del ".server.pid"
 
+rem ---------------------------------------------------------------
+rem Locate Python: venv first, then portable, else error
+rem   - works from any directory (%~dp0 is the app dir)
+rem ---------------------------------------------------------------
+set "PY="
+if exist "venv\Scripts\python.exe" (
+    set "PY=venv\Scripts\python.exe"
+) else if exist "..\runtime\python\python.exe" (
+    set "PY=..\runtime\python\python.exe"
+) else if exist "runtime\python\python.exe" (
+    set "PY=runtime\python\python.exe"
+)
+if not defined PY (
+    echo.
+    echo  ERROR: Python environment not found.
+    echo  Run setup.bat first to create venv / install portable Python.
+    echo.
+    pause
+    exit /b 1
+)
+echo   Using Python: %PY%
+
 echo [3/4] Starting server...
-start "DouyinExportServer" /min cmd /c "venv\Scripts\python.exe start_server.py > .server.log 2>&1"
+start "DouyinExportServer" /min cmd /c ""%PY%" start_server.py > .server.log 2>&1"
 
 echo [4/4] Waiting for server...
 set /a tries=0
