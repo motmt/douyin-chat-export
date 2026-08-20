@@ -137,7 +137,8 @@ class ScrapeRequest(BaseModel):
 class ExportRequest(BaseModel):
     format: str = "jsonl"
     filter: str = ""
-    conversations: list[str] | None = None  # selected nicknames; overrides filter
+    # 支持两种格式（兼容旧前端字符串 + 新前端 {name, conv_id} 对象）
+    conversations: list | None = None  # selected items; overrides filter
 
 
 class ScheduleRequest(BaseModel):

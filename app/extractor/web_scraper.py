@@ -870,6 +870,9 @@ class WebChatScraper:
         all_debug_names = list(m.get("names", []))
 
         # Not found in current view; scroll from top, incrementally.
+        # 修复: 原来固定滚 30 次(约9000px)就放弃，但 discover 能抓到 300+ 会话，
+        # 目标会话可能排在第 134+ 位，滚动距离远超 30 次 → 永远找不到。
+        # 改为: 滚到底(直到 at_bottom) + 复查一轮 + 没找到再从头扫，最多 3 遍。
         await self._safe_eval(f"""() => {{
             const list = document.querySelector('{SEL_CONV_LIST}');
             if (list) {{
@@ -879,35 +882,57 @@ class WebChatScraper:
         }}""")
         await asyncio.sleep(0.5)
 
-        for _ in range(30):
-            m = await _try_match()
-            if m["index"] >= 0:
-                clicked = await _click_index(m["index"], m["text"])
-                if clicked:
-                    return clicked
-
-            for n in m.get("names", []):
-                if n and n not in all_debug_names:
-                    all_debug_names.append(n)
-
-            reached_bottom = await self._safe_eval(f"""() => {{
-                const list = document.querySelector('{SEL_CONV_LIST}');
-                if (!list) return true;
-                const scrollable = list.querySelector('[style*="overflow"]') || list;
-                const before = scrollable.scrollTop;
-                scrollable.scrollTop += 300;
-                return scrollable.scrollTop === before;
-            }}""")
-            await asyncio.sleep(0.4)
-            if reached_bottom:
-                # 到底：等 1s 让懒加载更多完成，再复查一轮，防漏目标会话
-                await asyncio.sleep(1.0)
+        for _ in range(3):  # 最多 3 遍完整扫描
+            # 滚动到底，途中持续匹配
+            for _ in range(200):  # 单遍上限（防死循环）
                 m = await _try_match()
                 if m["index"] >= 0:
                     clicked = await _click_index(m["index"], m["text"])
                     if clicked:
                         return clicked
-                break
+
+                for n in m.get("names", []):
+                    if n and n not in all_debug_names:
+                        all_debug_names.append(n)
+
+                # 滚动 300px，判断是否到底
+                moved_bottom = await self._safe_eval(f"""() => {{
+                    const list = document.querySelector('{SEL_CONV_LIST}');
+                    if (!list) return true;
+                    const scrollable = list.querySelector('[style*="overflow"]') || list;
+                    const before = scrollable.scrollTop;
+                    const max = scrollable.scrollHeight - scrollable.clientHeight;
+                    scrollable.scrollTop += 300;
+                    const moved = scrollable.scrollTop !== before;
+                    const at_bottom = max <= 0 || scrollable.scrollTop >= max - 2;
+                    return {{ moved: moved, at_bottom: at_bottom }};
+                }}""")
+                if not moved_bottom.get("moved"):
+                    await asyncio.sleep(0.5)
+                if moved_bottom.get("at_bottom"):
+                    break
+                await asyncio.sleep(0.4)
+
+            # 到底后：等 1s 让懒加载完成，复查一轮
+            await asyncio.sleep(1.0)
+            m = await _try_match()
+            if m["index"] >= 0:
+                clicked = await _click_index(m["index"], m["text"])
+                if clicked:
+                    return clicked
+            for n in m.get("names", []):
+                if n and n not in all_debug_names:
+                    all_debug_names.append(n)
+
+            # 没找到 → 回到顶部开始下一遍（虚拟列表可能复用 DOM，名字已变）
+            await self._safe_eval(f"""() => {{
+                const list = document.querySelector('{SEL_CONV_LIST}');
+                if (list) {{
+                    const scrollable = list.querySelector('[style*="overflow"]') || list;
+                    scrollable.scrollTop = 0;
+                }}
+            }}""")
+            await asyncio.sleep(0.6)
 
         return {"found": False, "count": len(all_debug_names), "names": all_debug_names[:20]}
 
