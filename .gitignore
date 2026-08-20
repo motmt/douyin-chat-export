@@ -39,5 +39,8 @@ media.rar
 # Original repo backup (keep out of new repo)
 _original/
 
+# WorkBuddy project memory (local only, not for repo)
+.workbuddy/
+
 # Release build artifacts
 douyin-chat-export-release.zip
