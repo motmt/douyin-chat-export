@@ -21,8 +21,7 @@ else
 fi
 
 # 鍚姩鍚庣锛堝悓鏃?serve 鍓嶇 dist锛?
-nohup "$DIR/venv/bin/python3" -m uvicorn backend.main:app \
-  --host 127.0.0.1 --port 8001 \
+nohup "$DIR/venv/bin/python3" -E start_server.py \
   > "$DIR/.server.log" 2>&1 &
 
 echo $! > "$PID_FILE"

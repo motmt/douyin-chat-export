@@ -24,11 +24,11 @@ if [ "$MODE" = "web" ] || [ "$MODE" = "all" ]; then
     if [ "$MODE" = "web" ]; then
         # Foreground 鈥?this is the only service
         echo "[entrypoint] Starting web server (foreground)..."
-        exec python -m uvicorn backend.main:app --host 0.0.0.0 --port 8001
+        exec python -E start_server.py --host 0.0.0.0 --port 8001
     else
         # Background 鈥?scraper/scheduler will also run
         echo "[entrypoint] Starting web server (background)..."
-        python -m uvicorn backend.main:app --host 0.0.0.0 --port 8001 &
+        python -E start_server.py --host 0.0.0.0 --port 8001 &
         UVICORN_PID=$!
         sleep 1
     fi
